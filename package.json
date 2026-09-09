@@ -1,12 +1,10 @@
 {
   "name": "mindustry-global-chat",
   "version": "1.0.0",
-  "description": "Global chat for Mindustry",
+  "description": "Global chat and Tactical Hub for Mindustry",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
-  "dependencies": {
-    "ws": "^8.18.0"
-  }
+  "dependencies": {}
 }
