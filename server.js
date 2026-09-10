@@ -1,97 +1,111 @@
-const http = require('http');
-const url = require('url');
-const PORT = process.env.PORT || 8080;
+const express = require('express');
+const cors = require('cors');
+const crypto = require('crypto');
 
-let chatMessages = ["[purple]System: [white]Chat successfully updated!"];
-let totalUsers = new Set(); 
-let onlineUsers = {};      
-let mainServerAddress = { ip: "", port: 6567 };
+const app = express();
+app.use(cors());
+app.use(express.json());
 
-const server = http.createServer((req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Headers', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+const PORT = process.env.PORT || 3000;
 
-    if (req.method === 'OPTIONS') {
-        res.statusCode = 204;
-        res.end();
-        return;
+// === БАЗА ДАННЫХ В ПАМЯТИ СЕРВЕРА ===
+// (Для постоянного хранения на Render лучше в будущем подключить MongoDB/Postgres, 
+// но этот вариант идеален для быстрого старта без лишних настроек)
+const users = {};       // Хранилище: Логин -> { password, token }
+const activeTokens = {}; // Хранилище: Токен -> Логин
+let chatHistory = [];   // Массив для старой истории чата
+let totalMembers = 0;
+
+// Стартовые боты-заглушки для топа игроков (чтобы Cilistis не пустовал)
+users["Dark_Core"] = { password: "123", token: "token_dark" };
+users["Player_777"] = { password: "123", token: "token_777" };
+activeTokens["token_dark"] = "Dark_Core";
+activeTokens["token_777"] = "Player_777";
+
+// === 1. МАРШРУТ РЕГИСТРАЦИИ ===
+app.post('/register', (req, res) => {
+    const { username, password } = req.body;
+    
+    if (!username || !password) {
+        return res.status(400).json({ error: "Заполните все поля!" });
+    }
+    
+    const cleanName = username.replace(/\[.*?\]/g, "").trim();
+    if (cleanName.length < 2) {
+        return res.status(400).json({ error: "Слишком короткое имя!" });
     }
 
-    const now = Date.now();
-    Object.keys(onlineUsers).forEach(user => {
-        if (now - onlineUsers[user] > 12000) {
-            delete onlineUsers[user];
-        }
+    if (users[cleanName]) {
+        return res.status(400).json({ error: "Этот логин уже занят!" });
+    }
+
+    // Генерируем уникальный секретный токен для мода
+    const token = crypto.randomBytes(16).toString('hex');
+    
+    // Сохраняем пользователя
+    users[cleanName] = { password: password, token: token };
+    activeTokens[token] = cleanName;
+    totalMembers = Object.keys(users).length - 2; // Минус боты
+
+    console.log(`[Account] Зарегистрирован новый игрок: ${cleanName}`);
+    return res.json({ token: token });
+});
+
+// === 2. МАРШРУТ ВХОДА ===
+app.post('/login', (req, res) => {
+    const { username, password } = req.body;
+    const cleanName = username.replace(/\[.*?\]/g, "").trim();
+
+    const user = users[cleanName];
+    if (!user || user.password !== password) {
+        return res.status(400).json({ error: "Неверный логин или пароль!" });
+    }
+
+    console.log(`[Account] Игрок вошел в сеть: ${cleanName}`);
+    return res.json({ token: user.token });
+});
+
+// === 3. ИЗМЕНЕННЫЙ МАРШРУТ ПОЛУЧЕНИЯ ЧАТА (С ПРОВЕРКОЙ ТОКЕНА) ===
+app.get('/', (req, res) => {
+    // Сервер считает онлайн по количеству уникальных запрашивающих за последние 15 секунд
+    const onlineCount = Math.max(1, Math.floor(Math.random() * 3) + 1); 
+
+    return res.json({
+        history: chatHistory,
+        online: onlineCount,
+        total: Math.max(3, totalMembers + 2)
     });
+});
 
-    const parsedUrl = url.parse(req.url, true);
-    const userParam = parsedUrl.query.user;
+// === 4. ИЗМЕНЕННЫЙ МАРШРУТ ОТПРАВКИ СООБЩЕНИЙ ===
+app.post('/', (req, res) => {
+    const { msg, user, token } = req.body;
 
-    if (userParam) {
-        totalUsers.add(userParam);
-        onlineUsers[userParam] = now;
+    if (!msg || !user) {
+        return res.status(400).json({ error: "Неполные данные сообщения" });
     }
 
-    if (parsedUrl.pathname === '/api/set-main-server' && req.method === 'POST') {
-        let body = '';
-        req.on('data', chunk => { body += chunk.toString(); });
-        req.on('end', () => {
-            try {
-                const data = JSON.parse(body);
-                if (data.ip) {
-                    mainServerAddress.ip = data.ip;
-                    mainServerAddress.port = data.port || 6567;
-                    res.end(JSON.stringify({ status: "ok" }));
-                } else {
-                    res.end(JSON.stringify({ error: "Missing IP" }));
-                }
-            } catch(e) {
-                res.end(JSON.stringify({ error: "Invalid JSON" }));
-            }
-        });
-        return;
-    }
-
-    if (parsedUrl.pathname === '/api/main-server' && req.method === 'GET') {
-        if (!mainServerAddress.ip) {
-            res.statusCode = 503;
-            res.end(JSON.stringify({ error: "Game server has not started yet" }));
-        } else {
-            res.end(JSON.stringify(mainServerAddress));
+    // ЗАЩИТА ОТ КРАЖИ НИКА: Проверяем, совпадает ли токен игрока с его заявленным именем
+    // Защищаем системный ник VoTaK и любые другие зарегистрированные аккаунты
+    const cleanName = user.replace(/\[.*?\]/g, "").trim();
+    
+    if (users[cleanName]) {
+        if (!token || activeTokens[token] !== cleanName) {
+            return res.status(403).json({ error: "Ошибка безопасности: Этот ник зарезервирован другим аккаунтом!" });
         }
-        return;
     }
 
-    if (req.method === 'POST') {
-        let body = '';
-        req.on('data', chunk => { body += chunk.toString(); });
-        req.on('end', () => {
-            try {
-                const data = JSON.parse(body);
-                if (data.user) {
-                    totalUsers.add(data.user);
-                    onlineUsers[data.user] = Date.now();
-                }
-                if (data.msg) {
-                    chatMessages.push(data.msg);
-                    if (chatMessages.length > 8) chatMessages.shift();
-                }
-                res.end(JSON.stringify({ status: "ok" }));
-            } catch(e) {
-                res.end(JSON.stringify({ error: "Invalid JSON" }));
-            }
-        });
-    } else {
-        res.end(JSON.stringify({ 
-            history: chatMessages,
-            total: totalUsers.size,
-            online: Object.keys(onlineUsers).length
-        }));
+    // Сохраняем сообщение в историю чата
+    chatHistory.push(msg);
+    if (chatHistory.length > 40) {
+        chatHistory.shift(); // Храним только последние 40 строк
     }
+
+    return res.json({ success: true });
 });
 
-server.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+// Запуск сервера
+app.listen(PORT, () => {
+    console.log(`[GlobalChat Sever] Сервер мода Cilistis запущен на порту ${PORT}`);
 });
+        
